@@ -34,7 +34,12 @@ function fmtSize(n) {
 function fmtDate(s) {
 	if (!s)
 		return '—';
-	return s.replace('T', ' ').replace('Z', ' UTC').replace(/\.\d+/, '');
+	var d = new Date(s);
+	if (isNaN(d.getTime()))
+		return s;
+	var p = function(n) { return n < 10 ? '0' + n : '' + n; };
+	return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+		p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 function ensureOk(r) {
@@ -128,9 +133,7 @@ return view.extend({
 		n.pillWrap = E('span', {});
 
 		/* ---------- 服务状态 ---------- */
-		var btnStart = E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, 'onAction', 'start') }, '启动');
 		var btnRestart = E('button', { 'class': 'cbi-button', 'click': ui.createHandlerFn(this, 'onAction', 'restart') }, '重启');
-		var btnStop = E('button', { 'class': 'cbi-button cbi-button-negative', 'click': ui.createHandlerFn(this, 'onAction', 'stop') }, '停止');
 		var btnProbe = E('button', { 'class': 'cbi-button', 'click': ui.createHandlerFn(this, 'onProbe') }, '测试连接');
 		var btnRefresh = E('button', { 'class': 'cbi-button', 'click': ui.createHandlerFn(this, 'refresh') }, '刷新');
 
@@ -144,7 +147,7 @@ return view.extend({
 				[ '最近错误', n.lasterr ]
 			]),
 			E('div', { 'style': 'margin-top:14px;display:flex;flex-wrap:wrap;gap:8px' },
-				[ btnStart, btnRestart, btnStop, btnProbe, btnRefresh ]),
+				[ btnRestart, btnProbe, btnRefresh ]),
 			E('p', { 'class': 'cbi-value-description', 'style': 'margin:10px 0 0' },
 				'进程运行不代表已连接服务端，请以「最近一次连接成功」与「服务端探测」为准。')
 		], n.pillWrap);
