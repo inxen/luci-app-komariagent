@@ -121,7 +121,7 @@ function httpGet(url, outfile, timeout, extra) {
 
 	if (r.rc != 0) {
 		unlink(outfile);
-		let wgetOpt = (extra ?? '').indexOf('--no-check-certificate') >= 0 ? ' --no-check-certificate' : '';
+		let wgetOpt = index(`${extra ?? ''}`, '--no-check-certificate') >= 0 ? ' --no-check-certificate' : '';
 		let w = shell(`wget -q -T ${timeout} -O ${sq(outfile)}${wgetOpt} ${sq(url)} 2>&1`);
 		if (w.rc == 0 || trim2(w.out) != '')
 			r = w;
@@ -487,7 +487,7 @@ const methods = {
 				error: null
 			};
 			if (f.rc != 0 || f.body == '') {
-				result.error = '获取 GitHub Release 失败：' + (f.out != '' ? netHint(f.out) : '网络不可达');
+				result.error = '获取 GitHub Release 失败：' + (f.out != '' ? netHint(f.out) : '网络请求失败（可能是 GitHub API 限流或网络受限）');
 				unlink(tmp);
 				return result;
 			}
@@ -639,5 +639,21 @@ const methods = {
 		}
 	}
 };
+
+/* 把未捕获异常转成结构化错误，避免 ubus 侧只看到 Unknown error */
+function guard(fn) {
+	return function(request) {
+		try {
+			return fn(request);
+		}
+		catch (e) {
+			return { ok: false, error: `内部错误：${e}` };
+		}
+	};
+}
+
+for (let name in methods)
+	if (type(methods[name]?.call) == 'function')
+		methods[name].call = guard(methods[name].call);
 
 return { komari: methods };
