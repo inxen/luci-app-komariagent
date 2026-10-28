@@ -55,13 +55,13 @@ jobs:
             exit 1
           fi
           echo "SDK: $URL"
-          curl -fL -o sdk.tar "$DIR_URL$URL"
-          mkdir -p sdk
+          curl -fL -o /tmp/sdk.tar "$DIR_URL$URL"
+          mkdir -p /tmp/sdk
           case "$URL" in
-            *.tar.zst) tar --use-compress-program=unzstd -xf sdk.tar -C sdk --strip-components=1 ;;
-            *.tar.xz)  tar -xJf sdk.tar -C sdk --strip-components=1 ;;
+            *.tar.zst) tar --use-compress-program=unzstd -xf /tmp/sdk.tar -C /tmp/sdk --strip-components=1 ;;
+            *.tar.xz)  tar -xJf /tmp/sdk.tar -C /tmp/sdk --strip-components=1 ;;
           esac
-          echo "SDK_DIR=$PWD/sdk" >> "$GITHUB_ENV"
+          echo "SDK_DIR=/tmp/sdk" >> "$GITHUB_ENV"
 
       - name: Build package
         run: |
@@ -69,8 +69,9 @@ jobs:
           echo "SDK_DIR=${SDK_DIR:-<unset>}"
           cd "$SDK_DIR" || { echo "::error title=cd::SDK_DIR=$SDK_DIR"; exit 1; }
           mkdir -p package
+          rm -rf package/luci-app-komari
           cp -a "$GITHUB_WORKSPACE" package/luci-app-komari || { echo "::error title=cp::copy failed"; exit 1; }
-          rm -rf package/luci-app-komari/.git
+          rm -rf package/luci-app-komari/.git package/luci-app-komari/.github
 
           make defconfig
           DEC=$?
