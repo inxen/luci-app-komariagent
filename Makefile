@@ -13,8 +13,6 @@ PKG_MAINTAINER:=inxen
 
 include $(INCLUDE_DIR)/package.mk
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
-
 # 纯文件包：没有上游源码，显式声明空的构建步骤
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
