@@ -42,39 +42,53 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential gawk gettext unzip file libncurses-dev libssl-dev rsync zstd python3
 
-      - name: Fetch OpenWrt SDK
+      - name: Fetch SDK
         run: |
           set -euo pipefail
           DIR_URL="${{ matrix.base }}/${{ matrix.version }}/targets/${{ matrix.target }}/"
           echo "SDK index: $DIR_URL"
           URL=$(curl -fsSL "$DIR_URL" \
-            | grep -oE '${{ matrix.prefix }}[^"]*x86-64[^"]*Linux-x86_64\.tar\.zst' \
+            | grep -oE '${{ matrix.prefix }}[^"]*x86-64[^"]*Linux-x86_64\.tar\.(zst|xz)' \
             | sort -u | head -1)
           if [ -z "${URL:-}" ]; then
-            echo "could not locate SDK tarball at $DIR_URL" >&2
+            echo "::error title=SDK not found::$DIR_URL"
             exit 1
           fi
           echo "SDK: $URL"
-          curl -fL -o sdk.tar.zst "$DIR_URL$URL"
-          tar --use-compress-program=unzstd -xf sdk.tar.zst
-          SDK_DIR=$(find . -maxdepth 1 -type d -name '*sdk*' ! -name '.' | head -1)
-          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+          curl -fL -o sdk.tar "$DIR_URL$URL"
+          mkdir -p sdk
+          case "$URL" in
+            *.tar.zst) tar --use-compress-program=unzstd -xf sdk.tar -C sdk --strip-components=1 ;;
+            *.tar.xz)  tar -xJf sdk.tar -C sdk --strip-components=1 ;;
+          esac
+          echo "SDK_DIR=$PWD/sdk" >> "$GITHUB_ENV"
 
       - name: Build package
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd "$SDK_DIR"
           mkdir -p package
           cp -a "$GITHUB_WORKSPACE" package/luci-app-komari
           rm -rf package/luci-app-komari/.git
-          make defconfig >/dev/null
-          make package/luci-app-komari/compile V=s -j"$(nproc)"
+
+          if ! make defconfig > /tmp/defconfig.log 2>&1; then
+            echo "::error title=defconfig failed::$(tail -6 /tmp/defconfig.log | tr '\n' ' ' | cut -c1-800)"
+            tail -40 /tmp/defconfig.log
+            exit 1
+          fi
+
+          if ! make package/luci-app-komari/compile V=s -j"$(nproc)" > /tmp/build.log 2>&1; then
+            msg=$(grep -m3 -E 'Error|error:|No rule|not found|failed' /tmp/build.log | tr '\n' ' ' | cut -c1-800)
+            echo "::error title=build failed::${msg:-see log}"
+            tail -60 /tmp/build.log
+            exit 1
+          fi
 
       - name: Collect artifacts
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/artifacts/${{ matrix.name }}"
-          find "$SDK_DIR/bin/packages" -name 'luci-app-komari_*.${{ matrix.artifact }}' \
+          find "$SDK_DIR/bin/packages" -type f -name "luci-app-komari*.${{ matrix.artifact }}" \
             -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/${{ matrix.name }}/" \;
 
       - uses: actions/upload-artifact@v4
