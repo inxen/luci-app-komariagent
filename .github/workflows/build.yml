@@ -65,22 +65,26 @@ jobs:
 
       - name: Build package
         run: |
-          set -uo pipefail
-          cd "$SDK_DIR"
+          set +e -o pipefail
+          echo "SDK_DIR=${SDK_DIR:-<unset>}"
+          cd "$SDK_DIR" || { echo "::error title=cd::SDK_DIR=$SDK_DIR"; exit 1; }
           mkdir -p package
-          cp -a "$GITHUB_WORKSPACE" package/luci-app-komari
+          cp -a "$GITHUB_WORKSPACE" package/luci-app-komari || { echo "::error title=cp::copy failed"; exit 1; }
           rm -rf package/luci-app-komari/.git
 
-          if ! make defconfig > /tmp/defconfig.log 2>&1; then
-            echo "::error title=defconfig failed::$(tail -6 /tmp/defconfig.log | tr '\n' ' ' | cut -c1-800)"
-            tail -40 /tmp/defconfig.log
+          make defconfig
+          DEC=$?
+          echo "DEFCONFIG_RC=$DEC"
+          if [ "$DEC" -ne 0 ]; then
+            echo "::error title=defconfig::rc=$DEC"
             exit 1
           fi
 
-          if ! make package/luci-app-komari/compile V=s -j"$(nproc)" > /tmp/build.log 2>&1; then
-            msg=$(grep -m3 -E 'Error|error:|No rule|not found|failed' /tmp/build.log | tr '\n' ' ' | cut -c1-800)
-            echo "::error title=build failed::${msg:-see log}"
-            tail -60 /tmp/build.log
+          make package/luci-app-komari/compile V=s
+          BRC=$?
+          echo "BUILD_RC=$BRC"
+          if [ "$BRC" -ne 0 ]; then
+            echo "::error title=build::rc=$BRC"
             exit 1
           fi
 
