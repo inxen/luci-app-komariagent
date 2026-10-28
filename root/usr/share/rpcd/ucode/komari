@@ -104,10 +104,29 @@ function fetchOpts(c) {
 	return c.ignore_unsafe_cert ? ' --no-check-certificate' : '';
 }
 
-/* HTTP GET 到临时文件；返回 { rc, out, body } */
+/* 网络错误提示：对 EPERM 类拒绝给出可操作的建议 */
+function netHint(msg) {
+	let m = `${msg ?? ''}`;
+	if (match(m, /Operation not permitted|Permission denied/i) != null)
+		m += '（请求被系统拒绝，请检查代理/防火墙规则）';
+	return m;
+}
+
+/* HTTP GET 到临时文件；返回 { rc, out, body }
+   uclient-fetch 在部分受限环境（容器/chroot）会被内核拒绝并报 EPERM，
+   此时回退到 busybox wget，避免功能直接不可用。 */
 function httpGet(url, outfile, timeout, extra) {
 	unlink(outfile);
 	let r = shell(`uclient-fetch -q -O ${sq(outfile)} --timeout=${timeout}${extra ?? ''} ${sq(url)} 2>&1`);
+
+	if (r.rc != 0) {
+		unlink(outfile);
+		let wgetOpt = (extra ?? '').indexOf('--no-check-certificate') >= 0 ? ' --no-check-certificate' : '';
+		let w = shell(`wget -q -T ${timeout} -O ${sq(outfile)}${wgetOpt} ${sq(url)} 2>&1`);
+		if (w.rc == 0 || trim2(w.out) != '')
+			r = w;
+	}
+
 	let body = '';
 	try { body = readfile(outfile) ?? ''; } catch (e) { body = ''; }
 	return { rc: r.rc, out: trim2(r.out), body };
@@ -368,7 +387,7 @@ const methods = {
 			let err = null;
 			if (!pingOk) {
 				if (ping.rc != 0)
-					err = '连接失败：' + (ping.out != '' ? ping.out : 'rc=' + ping.rc);
+					err = '连接失败：' + (ping.out != '' ? netHint(ping.out) : 'rc=' + ping.rc);
 				else
 					err = '/ping 响应异常（服务端可达，但不像 Komari 面板）';
 			}
@@ -468,7 +487,7 @@ const methods = {
 				error: null
 			};
 			if (f.rc != 0 || f.body == '') {
-				result.error = '获取 GitHub Release 失败：' + (f.out != '' ? f.out : '网络不可达');
+				result.error = '获取 GitHub Release 失败：' + (f.out != '' ? netHint(f.out) : '网络不可达');
 				unlink(tmp);
 				return result;
 			}
