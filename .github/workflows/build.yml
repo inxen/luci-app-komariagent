@@ -1,0 +1,99 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: openwrt-24.10-ipk
+            base: https://downloads.openwrt.org/releases
+            version: '24.10.8'
+            target: x86/64
+            prefix: openwrt-sdk-
+            artifact: ipk
+          - name: openwrt-25.12-apk
+            base: https://downloads.openwrt.org/releases
+            version: '25.12.6'
+            target: x86/64
+            prefix: openwrt-sdk-
+            artifact: apk
+          - name: immortalwrt-25.12-apk
+            base: https://downloads.immortalwrt.org/releases
+            version: '25.12.2'
+            target: x86/64
+            prefix: immortalwrt-sdk-
+            artifact: apk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gawk gettext unzip file libncurses-dev libssl-dev rsync zstd python3
+
+      - name: Fetch OpenWrt SDK
+        run: |
+          set -euo pipefail
+          DIR_URL="${{ matrix.base }}/${{ matrix.version }}/targets/${{ matrix.target }}/"
+          echo "SDK index: $DIR_URL"
+          URL=$(curl -fsSL "$DIR_URL" \
+            | grep -oE '${{ matrix.prefix }}[^"]*x86-64[^"]*Linux-x86_64\.tar\.zst' \
+            | sort -u | head -1)
+          if [ -z "${URL:-}" ]; then
+            echo "could not locate SDK tarball at $DIR_URL" >&2
+            exit 1
+          fi
+          echo "SDK: $URL"
+          curl -fL -o sdk.tar.zst "$DIR_URL$URL"
+          tar --use-compress-program=unzstd -xf sdk.tar.zst
+          SDK_DIR=$(find . -maxdepth 1 -type d -name '*sdk*' ! -name '.' | head -1)
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
+      - name: Build package
+        run: |
+          set -euo pipefail
+          cd "$SDK_DIR"
+          mkdir -p package
+          cp -a "$GITHUB_WORKSPACE" package/luci-app-komari
+          rm -rf package/luci-app-komari/.git
+          make defconfig >/dev/null
+          make package/luci-app-komari/compile V=s -j"$(nproc)"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/${{ matrix.name }}"
+          find "$SDK_DIR/bin/packages" -name 'luci-app-komari_*.${{ matrix.artifact }}' \
+            -exec cp -v {} "$GITHUB_WORKSPACE/artifacts/${{ matrix.name }}/" \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: artifacts/${{ matrix.name }}/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*

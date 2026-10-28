@@ -1,0 +1,15 @@
+{
+	"admin/services/komari": {
+		"title": "Komari Agent",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "komari/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-komari"
+			]
+		}
+	}
+}

@@ -1,0 +1,36 @@
+{
+	"luci-app-komari": {
+		"description": "Komari Agent 控制器",
+		"read": {
+			"ubus": {
+				"komari": [
+					"getStatus",
+					"getLog",
+					"probeServer",
+					"checkUpdate",
+					"getJob"
+				]
+			},
+			"uci": [
+				"komari_agent"
+			]
+		},
+		"write": {
+			"ubus": {
+				"komari": [
+					"serviceAction",
+					"startInstall",
+					"installLocal",
+					"uploadBegin",
+					"uploadChunk",
+					"uploadEnd",
+					"uploadAbort",
+					"setToken"
+				]
+			},
+			"uci": [
+				"komari_agent"
+			]
+		}
+	}
+}

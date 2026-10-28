@@ -1,0 +1,4 @@
+#!/bin/sh
+# Komari Agent 配置文件收紧权限（Token 仅 root 可读）
+[ -f /etc/config/komari_agent ] && chmod 600 /etc/config/komari_agent
+exit 0

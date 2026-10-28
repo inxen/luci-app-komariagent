@@ -1,0 +1,82 @@
+#!/bin/sh /etc/rc.common
+# Komari Agent procd service
+# 参数全部经 UCI 读取并以 argv 数组形式交给 procd，不经 shell 二次解析。
+
+START=99
+STOP=15
+USE_PROCD=1
+
+PROG=/usr/bin/komari-agent
+CONF=komari_agent
+
+start_service() {
+	local enabled endpoint token interval dweb dcert
+	local nics exclude_nics mounts rint rmax
+
+	config_load "$CONF"
+	config_get_bool enabled      'agent' 'enabled'           0
+	config_get      endpoint     'agent' 'endpoint'          ''
+	config_get      token        'agent' 'token'             ''
+	config_get      interval     'agent' 'interval'          '3'
+	config_get_bool dweb         'agent' 'disable_web_ssh'   1
+	config_get_bool dcert        'agent' 'ignore_unsafe_cert' 0
+	config_get      nics         'agent' 'include_nics'      ''
+	config_get      exclude_nics 'agent' 'exclude_nics'      ''
+	config_get      mounts       'agent' 'include_mountpoints' ''
+	config_get      rint         'agent' 'reconnect_interval' '5'
+	config_get      rmax         'agent' 'max_retries'       '3'
+
+	[ "$enabled" = "1" ] || {
+		logger -t komari-agent "服务未启用（uci $CONF.agent.enabled=0），跳过启动"
+		return 1
+	}
+
+	[ -x "$PROG" ] || {
+		logger -t komari-agent "未找到 Agent 二进制 $PROG，请在 LuCI「Komari Agent」页面检查更新或上传"
+		return 1
+	}
+
+	[ -n "$endpoint" ] || {
+		logger -t komari-agent "未配置服务端地址，跳过启动"
+		return 1
+	}
+
+	# 数值/字符白名单校验，防止把异常内容塞进 argv
+	case "$interval" in ''|*[!0-9.]*) interval=3 ;; esac
+	case "$rint" in ''|*[!0-9]*) rint=5 ;; esac
+	case "$rmax" in ''|*[!0-9]*) rmax=3 ;; esac
+	case "$endpoint" in *[!A-Za-z0-9._~:/?#\[\]@!\$\&\'\(\)\*+,\;=%-]*) logger -t komari-agent "endpoint 含非法字符，拒绝启动"; return 1 ;; esac
+
+	chmod 600 /etc/config/$CONF 2>/dev/null
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		--endpoint "$endpoint" \
+		--interval "$interval" \
+		--disable-auto-update \
+		--reconnect-interval "$rint" \
+		--max-retries "$rmax"
+
+	[ "$dweb" = "1" ] && procd_append_param command --disable-web-ssh
+	[ "$dcert" = "1" ] && procd_append_param command --ignore-unsafe-cert
+	[ -n "$nics" ] && procd_append_param command --include-nics "$nics"
+	[ -n "$exclude_nics" ] && procd_append_param command --exclude-nics "$exclude_nics"
+	[ -n "$mounts" ] && procd_append_param command --include-mountpoint "$mounts"
+
+	# Token 走环境变量：/proc/<pid>/environ 仅 root 可读，不进入全局可读的 cmdline
+	procd_set_param env AGENT_TOKEN="$token"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param file /etc/config/$CONF
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$CONF"
+}
+
+reload_service() {
+	stop
+	start
+}

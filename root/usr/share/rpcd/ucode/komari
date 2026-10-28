@@ -1,0 +1,624 @@
+#!/usr/bin/ucode
+// SPDX-License-Identifier: MIT
+//
+// luci-app-komari —— rpcd ucode 插件
+// 职责：UCI 读取、进程状态、日志、服务端探测、GitHub Release 检查与安装、
+//       以及手动上传的分块接收。所有外部命令参数均经过白名单校验。
+//
+// 安全要点：
+//   * Token 只在后端使用，永不返回给前端（仅返回 token_set 布尔）
+//   * 日志返回前对 Token 做脱敏
+//   * 安装 URL 限定为 GitHub 官方仓库 Release 路径
+//   * 下载在后台任务中进行（setsid + 状态文件轮询），不阻塞 ubus
+
+'use strict';
+
+import { popen, readfile, writefile, open, stat, access, unlink, chmod } from 'fs';
+import { cursor } from 'uci';
+
+const API_BASE = 'https://api.github.com/repos/komari-monitor/komari-agent';
+const ASSET_NAME = 'komari-agent-linux-arm64';
+const BIN = '/usr/bin/komari-agent';
+const VERSION_FILE = '/usr/share/komari-agent/version';
+const JOB_SCRIPT = '/usr/libexec/komari/install-job.sh';
+const ST_STATUS = '/tmp/komari.install.status';
+const ST_DOWNLOAD = '/tmp/komari-agent.download';
+const ST_UPLOAD = '/tmp/komari-agent.upload';
+const ST_UMETA = '/tmp/komari-agent.upload.meta';
+const CONF_FILE = '/etc/config/komari_agent';
+const MIN_SIZE = 1024 * 1024;
+const MAX_SIZE = 128 * 1024 * 1024;
+
+/* ---------------- 基础工具 ---------------- */
+
+function fail(msg) {
+	return { ok: false, error: `${msg}` };
+}
+
+function sq(s) {
+	return `'${replace(`${s}`, /'/g, `'\\''`)}'`;
+}
+
+function trim2(s) {
+	return s == null ? '' : replace(`${s}`, /^[ \t\r\n]+|[ \t\r\n]+$/g, '');
+}
+
+function shell(cmd) {
+	let p = popen(`${cmd}; echo "__RC__=$?"`);
+	if (!p)
+		return { rc: -1, out: '' };
+	let out = p.read('all') ?? '';
+	p.close();
+	let m = match(out, /__RC__=(-?\d+)\s*$/);
+	let rc = m ? +m[1] : -1;
+	if (m)
+		out = replace(out, /__RC__=-?\d+\s*$/, '');
+	return { rc, out };
+}
+
+function spawn(cmd) {
+	let p = popen(cmd);
+	if (!p)
+		return false;
+	p.read('all');
+	p.close();
+	return true;
+}
+
+function fsize(path) {
+	try {
+		let s = stat(path);
+		return s ? s.size : -1;
+	} catch (e) {
+		return -1;
+	}
+}
+
+function exists(path) {
+	return access(path);
+}
+
+function readJson(path) {
+	try {
+		let raw = readfile(path);
+		return raw ? json(raw) : null;
+	} catch (e) {
+		return null;
+	}
+}
+
+function conf() {
+	let u = cursor();
+	let g = function(k) { return u.get('komari_agent', 'agent', k); };
+	return {
+		enabled: g('enabled') == '1',
+		endpoint: trim2(g('endpoint') ?? ''),
+		token: g('token') ?? '',
+		interval: g('interval') ?? '3',
+		disable_web_ssh: (g('disable_web_ssh') ?? '1') != '0',
+		ignore_unsafe_cert: (g('ignore_unsafe_cert') ?? '0') == '1'
+	};
+}
+
+function fetchOpts(c) {
+	return c.ignore_unsafe_cert ? ' --no-check-certificate' : '';
+}
+
+/* HTTP GET 到临时文件；返回 { rc, out, body } */
+function httpGet(url, outfile, timeout, extra) {
+	unlink(outfile);
+	let r = shell(`uclient-fetch -q -O ${sq(outfile)} --timeout=${timeout}${extra ?? ''} ${sq(url)} 2>&1`);
+	let body = '';
+	try { body = readfile(outfile) ?? ''; } catch (e) { body = ''; }
+	return { rc: r.rc, out: trim2(r.out), body };
+}
+
+/* ---------------- 状态与日志 ---------------- */
+
+function serviceState() {
+	let r = shell(`ubus call service list '{"name":"komari-agent"}'`);
+	if (r.rc != 0)
+		return { running: false, pid: null };
+	let j = null;
+	try { j = json(r.out); } catch (e) { j = null; }
+	let svc = j ? j['komari-agent'] : null;
+	if (svc && svc.instances) {
+		for (let k in svc.instances) {
+			let inst = svc.instances[k];
+			return { running: inst.running === true, pid: inst.pid ?? null };
+		}
+	}
+	return { running: false, pid: null };
+}
+
+function logLines() {
+	let r = shell('logread -e komari-agent');
+	if (r.rc != 0)
+		return [];
+	let txt = r.out ?? '';
+	if (trim2(txt) == '')
+		return [];
+	return split(txt, '\n');
+}
+
+function sanitize(lines, token) {
+	let out = [];
+	for (let i = 0; i < length(lines); i++) {
+		let l = lines[i];
+		if (token != null && token != '') {
+			let parts = split(l, token);
+			if (length(parts) > 1) {
+				let masked = parts[0];
+				for (let k = 1; k < length(parts); k++)
+					masked += '********' + parts[k];
+				l = masked;
+			}
+		}
+		push(out, l);
+	}
+	return out;
+}
+
+/* 启动/安装后从「新增」日志行抓取版本并持久化，避免日志环形缓冲被冲掉后无法显示 */
+function captureVersionFromLog(before) {
+	let lines = logLines();
+	for (let i = length(lines) - 1; i >= before && i >= 0; i--) {
+		let m = match(lines[i], /Komari Agent ([0-9][0-9A-Za-z._-]*)/);
+		if (m) {
+			shell('mkdir -p /usr/share/komari-agent');
+			writefile(VERSION_FILE, m[1] + '\n');
+			return m[1];
+		}
+	}
+	return null;
+}
+
+function installedVersion() {
+	if (exists(VERSION_FILE)) {
+		let v = trim2(readfile(VERSION_FILE) ?? '');
+		if (v != '')
+			return v;
+	}
+	let lines = logLines();
+	for (let i = length(lines) - 1; i >= 0; i--) {
+		let m = match(lines[i], /Komari Agent ([0-9][0-9A-Za-z._-]*)/);
+		if (m)
+			return m[1];
+	}
+	return null;
+}
+
+function verParts(v) {
+	let m = match(v ?? '', /^v?(\d+)\.(\d+)\.(\d+)/);
+	return m ? [ +m[1], +m[2], +m[3] ] : null;
+}
+
+/* 返回 true=新版更大 / false=相同或更旧 / null=无法比较 */
+function verGreater(a, b) {
+	let pa = verParts(a), pb = verParts(b);
+	if (!pa || !pb)
+		return null;
+	for (let i = 0; i < 3; i++)
+		if (pa[i] != pb[i])
+			return pa[i] > pb[i];
+	return false;
+}
+
+/* ---------------- 安装任务状态 ---------------- */
+
+function jobState() {
+	let st = null;
+	if (exists(ST_STATUS)) {
+		try { st = json(trim2(readfile(ST_STATUS) ?? '')); } catch (e) { st = null; }
+	}
+	let phase = st ? (st.phase ?? 'idle') : 'idle';
+	let total = st ? +(st.total ?? 0) : 0;
+	let bytes = 0;
+	if (phase == 'downloading') {
+		bytes = fsize(ST_DOWNLOAD);
+		if (bytes < 0)
+			bytes = 0;
+	}
+	else if (phase == 'installing' || phase == 'verifying' || phase == 'done')
+		bytes = total;
+	return {
+		phase: phase,
+		message: st ? (st.message ?? '') : '',
+		total: total,
+		bytes: bytes,
+		msg_time: st ? (st.msg_time ?? null) : null
+	};
+}
+
+function jobActive() {
+	let j = jobState();
+	return j.phase == 'downloading' || j.phase == 'verifying' || j.phase == 'installing';
+}
+
+/* ---------------- 校验 ---------------- */
+
+function validVersion(v) {
+	return match(v ?? '', /^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$/) != null;
+}
+
+function validDigest(d) {
+	return match(d ?? '', /^[0-9a-f]{64}$/) != null;
+}
+
+function validUrl(u) {
+	return match(u ?? '', /^https:\/\/github\.com\/komari-monitor\/komari-agent\/releases\/download\/[0-9A-Za-z._\/-]+$/) != null;
+}
+
+function elfHeaderHex(path) {
+	let r = shell(`head -c 20 ${sq(path)} | hexdump -v -e '1/1 "%02x"'`);
+	return trim2(r.out);
+}
+
+function checkElfArm64(path) {
+	let hex = elfHeaderHex(path);
+	if (substr(hex, 0, 8) != '7f454c46')
+		return '不是 ELF 文件';
+	if (substr(hex, 8, 2) != '02')
+		return '不是 64 位 ELF';
+	if (substr(hex, 36, 4) != 'b700')
+		return '不是 ARM64（aarch64）二进制';
+	return null;
+}
+
+/* 把 /tmp 下的文件安装为 Agent 二进制 */
+function doInstallLocal(path) {
+	if (!match(path ?? '', /^\/tmp\/[A-Za-z0-9._-]+$/))
+		return fail('非法文件路径');
+	let size = fsize(path);
+	if (size < MIN_SIZE)
+		return fail('文件过小，不是有效的 Agent 二进制');
+	if (size > MAX_SIZE)
+		return fail('文件过大');
+	let elfErr = checkElfArm64(path);
+	if (elfErr)
+		return fail(elfErr);
+	let r = shell(`cp -f ${sq(path)} /usr/bin/.komari-agent.new && chmod 0755 /usr/bin/.komari-agent.new && mv -f /usr/bin/.komari-agent.new ${BIN}`);
+	if (r.rc != 0)
+		return fail('写入二进制失败');
+	unlink(VERSION_FILE);
+	unlink(path);
+	if (conf().enabled) {
+		/* 手动安装无版本元数据：重启后只从新增日志行里抓版本 */
+		let before = length(logLines());
+		shell('/etc/init.d/komari-agent restart');
+		shell('sleep 2');
+		captureVersionFromLog(before);
+	}
+	return { ok: true, size: size };
+}
+
+/* ---------------- 方法实现 ---------------- */
+
+const methods = {
+
+	getStatus: {
+		call: function() {
+			let c = conf();
+			let st = serviceState();
+			let lines = sanitize(logLines(), c.token);
+			let lastConnect = null, lastError = null;
+			for (let i = length(lines) - 1; i >= 0; i--) {
+				if (lastConnect == null && match(lines[i], /WebSocket connected/))
+					lastConnect = lines[i];
+				if (lastError == null && match(lines[i], /WebSocket disconnected|Failed to connect|Max retries|Entering v2 POST fallback|disabled|失败|错误/))
+					lastError = lines[i];
+				if (lastConnect != null && lastError != null)
+					break;
+			}
+			return {
+				binary_exists: access(BIN) ? true : false,
+				binary_size: fsize(BIN),
+				version: installedVersion(),
+				running: st.running,
+				pid: st.pid,
+				enabled: c.enabled,
+				endpoint: c.endpoint,
+				interval: c.interval,
+				disable_web_ssh: c.disable_web_ssh,
+				ignore_unsafe_cert: c.ignore_unsafe_cert,
+				token_set: c.token != '',
+				last_connect: lastConnect,
+				last_error: lastError,
+				log_tail: slice(lines, -25),
+				job: jobState()
+			};
+		}
+	},
+
+	getLog: {
+		args: { lines: 100 },
+		call: function(request) {
+			let n = +request.args.lines;
+			if (!(n >= 10 && n <= 500))
+				n = 100;
+			let c = conf();
+			return { lines: slice(sanitize(logLines(), c.token), -n) };
+		}
+	},
+
+	probeServer: {
+		call: function() {
+			let c = conf();
+			if (c.endpoint == '')
+				return { ok: false, error: '未配置服务端地址' };
+			let base = replace(c.endpoint, /\/+$/, '');
+			if (!match(base, /^https?:\/\/[^\s]+$/))
+				return { ok: false, error: '服务端地址格式无效' };
+			let tmp = `/tmp/komari.probe.${time()}`;
+			let opt = fetchOpts(c);
+
+			let ping = httpGet(`${base}/ping`, tmp, 5, opt);
+			let pingOk = (ping.rc == 0 && match(ping.body, /pong/) != null);
+
+			let ver = null;
+			let vfetch = pingOk ? httpGet(`${base}/api/version`, tmp, 5, opt) : { rc: -1, body: '' };
+			if (vfetch.rc == 0) {
+				try {
+					let j = json(vfetch.body);
+					ver = j ? (j.version ?? null) : null;
+				} catch (e) { ver = null; }
+			}
+			unlink(tmp);
+
+			let err = null;
+			if (!pingOk) {
+				if (ping.rc != 0)
+					err = '连接失败：' + (ping.out != '' ? ping.out : 'rc=' + ping.rc);
+				else
+					err = '/ping 响应异常（服务端可达，但不像 Komari 面板）';
+			}
+			return { ok: pingOk, server_version: ver, error: err, endpoint: c.endpoint };
+		}
+	},
+
+	setToken: {
+		args: { token: '' },
+		call: function(request) {
+			let v = `${request.args.token ?? ''}`;
+			if (v === '')
+				return { ok: true, changed: false };
+			if (length(v) > 512)
+				return fail('Token 过长');
+			if (match(v, /[^A-Za-z0-9._~+\/=\-]/) != null)
+				return fail('Token 含非法字符');
+			let u = cursor();
+			u.set('komari_agent', 'agent', 'token', v);
+			u.commit('komari_agent');
+			chmod(CONF_FILE, 0o600);
+			return { ok: true, changed: true };
+		}
+	},
+
+	serviceAction: {
+		args: { action: '' },
+		call: function(request) {
+			let action = `${request.args.action ?? ''}`;
+			let allowed = [ 'start', 'stop', 'restart', 'enable', 'disable', 'apply', 'sync' ];
+			if (index(allowed, action) < 0)
+				return fail('不支持的操作');
+			if (action == 'start' || action == 'stop') {
+				let u = cursor();
+				u.set('komari_agent', 'agent', 'enabled', action == 'start' ? '1' : '0');
+				u.commit('komari_agent');
+			}
+			if (action == 'apply') {
+				let c = conf();
+				action = c.enabled ? 'restart' : 'stop';
+			}
+			else if (action == 'sync') {
+				/* 仅收敛「启用状态」与「实际运行」的差异，不打断已正常运行的服务 */
+				let c = conf();
+				let st = serviceState();
+				if (c.enabled && !st.running)
+					action = 'start';
+				else if (!c.enabled && st.running)
+					action = 'stop';
+				else
+					return { ok: true, action: 'noop', output: '', error: null };
+			}
+			let r = shell(`/etc/init.d/komari-agent ${action} 2>&1`);
+			let out = trim2(r.out);
+			/* init 脚本的返回码不可靠（rc.common 会吞掉 start_service 的返回值），
+			   以 procd 实际状态为准 */
+			shell('sleep 1');
+			if (action == 'start' || action == 'restart') {
+				shell('sleep 1');
+				captureVersionFromLog(0);
+			}
+			let st = serviceState();
+			let ok;
+			if (action == 'stop')
+				ok = !st.running;
+			else if (action == 'start' || action == 'restart')
+				ok = st.running;
+			else
+				ok = r.rc == 0;
+			let err = null;
+			if (!ok) {
+				if (out != '')
+					err = out;
+				else if (action == 'start' || action == 'restart')
+					err = '服务未能启动：请确认已安装 Agent 二进制、已配置服务端地址（原因见下方日志）';
+				else
+					err = '操作未生效（详见日志）';
+			}
+			return { ok: ok, action: action, output: out, error: err };
+		}
+	},
+
+	checkUpdate: {
+		call: function() {
+			let c = conf();
+			let tmp = '/tmp/komari.release.json';
+			let f = httpGet(`${API_BASE}/releases/latest`, tmp, 20, fetchOpts(c));
+			let result = {
+				ok: false,
+				installed: installedVersion(),
+				latest: null,
+				has_update: null,
+				published: null,
+				size: null,
+				digest: null,
+				url: null,
+				error: null
+			};
+			if (f.rc != 0 || f.body == '') {
+				result.error = '获取 GitHub Release 失败：' + (f.out != '' ? f.out : '网络不可达');
+				unlink(tmp);
+				return result;
+			}
+			let rel = null;
+			try { rel = json(f.body); } catch (e) { rel = null; }
+			unlink(tmp);
+			if (rel == null) {
+				result.error = 'GitHub API 响应解析失败';
+				return result;
+			}
+			if (!rel.tag_name) {
+				result.error = rel.message ?? 'GitHub API 返回异常（可能触发频率限制）';
+				return result;
+			}
+			result.latest = rel.tag_name;
+			result.published = rel.published_at ?? null;
+			let asset = null;
+			if (rel.assets) {
+				for (let i = 0; i < length(rel.assets); i++)
+					if (rel.assets[i].name == ASSET_NAME)
+						asset = rel.assets[i];
+			}
+			if (asset == null) {
+				result.error = `Release ${rel.tag_name} 未找到 ${ASSET_NAME} 资产`;
+				return result;
+			}
+			result.size = asset.size ?? null;
+			result.url = asset.browser_download_url ?? null;
+			if (asset.digest != null && match(`${asset.digest}`, /^sha256:[0-9a-f]{64}$/))
+				result.digest = replace(`${asset.digest}`, /^sha256:/, '');
+			let cmp = result.installed ? verGreater(result.latest, result.installed) : true;
+			result.has_update = cmp === null ? true : cmp;
+			result.ok = true;
+			return result;
+		}
+	},
+
+	startInstall: {
+		args: { version: '', url: '', digest: '', size: 0 },
+		call: function(request) {
+			let version = `${request.args.version ?? ''}`;
+			let url = `${request.args.url ?? ''}`;
+			let digest = `${request.args.digest ?? ''}`;
+			let size = +request.args.size;
+
+			if (!validVersion(version))
+				return fail('版本号格式非法');
+			if (!validUrl(url))
+				return fail('下载地址不在允许范围内（仅限 GitHub 官方 Release）');
+			if (!validDigest(digest))
+				return fail('缺少合法的 SHA256 摘要，拒绝安装未校验文件');
+			if (!(size >= MIN_SIZE && size <= MAX_SIZE))
+				return fail('文件大小超出允许范围');
+			if (jobActive())
+				return fail('已有安装任务正在进行');
+			writefile(ST_STATUS, sprintf('{"phase":"starting","message":"准备安装 %s","total":%d}\n', version, size));
+			unlink(ST_DOWNLOAD);
+
+			spawn(`setsid sh ${sq(JOB_SCRIPT)} ${sq(url)} ${sq(digest)} ${sq(size)} ${sq(version)} </dev/null >/dev/null 2>&1 &`);
+			return { ok: true, version: version };
+		}
+	},
+
+	getJob: {
+		call: function() {
+			let j = jobState();
+			j.version = installedVersion();
+			j.binary_exists = exists(BIN);
+			return j;
+		}
+	},
+
+	installLocal: {
+		args: { path: '' },
+		call: function(request) {
+			if (jobActive())
+				return fail('已有安装任务正在进行');
+			return doInstallLocal(`${request.args.path ?? ''}`);
+		}
+	},
+
+	uploadBegin: {
+		args: { size: 0 },
+		call: function(request) {
+			let size = +request.args.size;
+			if (!(size >= MIN_SIZE && size <= MAX_SIZE))
+				return fail('文件大小超出允许范围（1MB - 128MB）');
+			if (jobActive())
+				return fail('已有安装任务正在进行');
+			writefile(ST_UPLOAD, '');
+			writefile(ST_UMETA, sprintf('{"size":%d,"next":0}\n', size));
+			return { ok: true, total: size };
+		}
+	},
+
+	uploadChunk: {
+		args: { seq: 0, data: '' },
+		call: function(request) {
+			let meta = readJson(ST_UMETA);
+			if (meta == null)
+				return fail('上传会话不存在，请重新选择文件');
+			let seq = +request.args.seq;
+			if (seq != meta.next)
+				return fail(`分块序号不连续（期望 ${meta.next}，收到 ${seq}）`);
+			let bin = b64dec(`${request.args.data ?? ''}`);
+			if (bin == null || length(bin) == 0)
+				return fail('无效的分块数据');
+			let fd = open(ST_UPLOAD, 'a');
+			if (!fd)
+				return fail('无法写入上传缓存');
+			fd.write(bin);
+			fd.close();
+			meta.next = seq + 1;
+			writefile(ST_UMETA, sprintf('%J', meta));
+			let written = fsize(ST_UPLOAD);
+			if (written > meta.size) {
+				unlink(ST_UPLOAD);
+				unlink(ST_UMETA);
+				return fail('上传内容超出声明大小');
+			}
+			return { ok: true, written: written, total: meta.size, seq: seq };
+		}
+	},
+
+	uploadEnd: {
+		call: function() {
+			let meta = readJson(ST_UMETA);
+			if (meta == null)
+				return fail('上传会话不存在');
+			let size = fsize(ST_UPLOAD);
+			if (size != meta.size) {
+				unlink(ST_UPLOAD);
+				unlink(ST_UMETA);
+				return fail(`上传不完整（${size} / ${meta.size} 字节）`);
+			}
+			let r = doInstallLocal(ST_UPLOAD);
+			unlink(ST_UMETA);
+			if (r.ok !== true)
+				unlink(ST_UPLOAD);
+			return r;
+		}
+	},
+
+	uploadAbort: {
+		call: function() {
+			unlink(ST_UPLOAD);
+			unlink(ST_UMETA);
+			return { ok: true };
+		}
+	}
+};
+
+return { komari: methods };
