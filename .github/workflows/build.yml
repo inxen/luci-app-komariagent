@@ -112,7 +112,22 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release
-          merge-multiple: true
+
+      - name: Flatten artifacts
+        run: |
+          cd release
+          for d in */; do
+            for f in "$d"*; do
+              b=$(basename "$f")
+              case "$d" in
+                immortalwrt*) cp -f "$f" "./${b%.*}-immortalwrt.${b##*.}" ;;
+                *) cp -f "$f" "./$b" ;;
+              esac
+            done
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: |
+            release/*.ipk
+            release/*.apk
