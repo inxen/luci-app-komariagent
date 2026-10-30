@@ -11,7 +11,7 @@ CONF=komari_agent
 
 start_service() {
 	local enabled endpoint token interval dweb dcert
-	local nics exclude_nics mounts rint rmax
+	local nics exclude_nics mounts rint rmax ip_mode ipv4 ipv6
 
 	config_load "$CONF"
 	config_get_bool enabled      'agent' 'enabled'           0
@@ -25,6 +25,9 @@ start_service() {
 	config_get      mounts       'agent' 'include_mountpoints' ''
 	config_get      rint         'agent' 'reconnect_interval' '5'
 	config_get      rmax         'agent' 'max_retries'       '3'
+	config_get      ip_mode      'agent' 'ip_mode'           'auto'
+	config_get      ipv4         'agent' 'custom_ipv4'       ''
+	config_get      ipv6         'agent' 'custom_ipv6'       ''
 
 	[ "$enabled" = "1" ] || {
 		logger -t komari-agent "服务未启用（uci $CONF.agent.enabled=0），跳过启动"
@@ -62,6 +65,23 @@ start_service() {
 	[ -n "$nics" ] && procd_append_param command --include-nics "$nics"
 	[ -n "$exclude_nics" ] && procd_append_param command --exclude-nics "$exclude_nics"
 	[ -n "$mounts" ] && procd_append_param command --include-mountpoint "$mounts"
+
+	# IP 上报来源：auto=外部接口探测（默认）；nic=读网卡；custom=固定值
+	case "$ip_mode" in
+		nic)
+			procd_append_param command --get-ip-addr-from-nic
+			;;
+		custom)
+			case "$ipv4" in
+				''|*[!0-9.]*) [ -n "$ipv4" ] && logger -t komari-agent "自定义 IPv4 格式异常，已忽略" ;;
+				*) procd_append_param command --custom-ipv4 "$ipv4" ;;
+			esac
+			case "$ipv6" in
+				''|*[!0-9A-Fa-f:.]*) [ -n "$ipv6" ] && logger -t komari-agent "自定义 IPv6 格式异常，已忽略" ;;
+				*) [ -n "$ipv6" ] && procd_append_param command --custom-ipv6 "$ipv6" ;;
+			esac
+			;;
+	esac
 
 	# Token 走环境变量：/proc/<pid>/environ 仅 root 可读，不进入全局可读的 cmdline
 	procd_set_param env AGENT_TOKEN="$token"

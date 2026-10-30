@@ -296,6 +296,26 @@ return view.extend({
 		o.placeholder = '/';
 		o.rmempty = true;
 
+		o = s.option(form.ListValue, 'ip_mode', 'IP 获取方式',
+			'上报给面板的本机 IP 来源。自动模式依次请求若干公共接口；网卡模式直接读本机地址，不依赖外网。');
+		o.value('auto', '自动（外部接口探测）');
+		o.value('nic', '从网卡读取（受上面的网卡过滤影响）');
+		o.value('custom', '自定义固定值');
+		o.default = 'auto';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'custom_ipv4', '自定义 IPv4', '仅在「自定义固定值」时生效。');
+		o.datatype = 'ip4addr';
+		o.placeholder = '203.0.113.10';
+		o.rmempty = true;
+		o.depends('ip_mode', 'custom');
+
+		o = s.option(form.Value, 'custom_ipv6', '自定义 IPv6', '仅在「自定义固定值」时生效；留空则只上报 IPv4。');
+		o.datatype = 'ip6addr';
+		o.placeholder = '2001:db8::1';
+		o.rmempty = true;
+		o.depends('ip_mode', 'custom');
+
 		s = m.section(form.NamedSection, 'agent', 'komari_agent', '高级');
 		s.addremove = false;
 

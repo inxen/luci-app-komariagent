@@ -9,5 +9,8 @@ config komari_agent 'agent'
 	option include_nics 'pppoe-wan'
 	option exclude_nics ''
 	option include_mountpoints '/'
+
+	# IP 上报来源：auto=外部接口探测 / nic=读网卡 / custom=固定值
+	option ip_mode 'auto'
 	option reconnect_interval '5'
 	option max_retries '3'
