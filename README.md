@@ -17,7 +17,7 @@ Komari Agent 的 LuCI 管理插件，只做控制器，**不打包 Agent 二进�
 - **更新与安装**：检查 GitHub 最新 Release，显示版本 / 发布时间 / 资产大小 / SHA256；后台下载并安装，页面轮询进度；也可手动上传二进制
 - **连接设置**：服务端地址、Agent Token（不回显，留空保持不变）、上报间隔、禁用远程控制、忽略 TLS 证书错误
 - **采集范围**：网卡过滤（默认仅 `pppoe-wan`）、挂载点过滤（默认仅 `/`）、重连间隔、最大重试次数
-- **日志**：最近日志尾部，Token 自动脱敏
+- **日志**：写入 `/tmp/log`（tmpfs 内存，不占闪存、不写系统日志），大小上限可配置，超过后自动裁剪；页面展示最近记录，Token 自动脱敏，时间按浏览器时区显示
 - 启动 / 停止 / 重启，带确认
 
 ## 安全默认
@@ -113,6 +113,10 @@ apk add --allow-untrusted luci-app-komari-*.apk
 - **参数传递**：配置以 argv 数组交给 procd，不经 shell 二次解析；Token 经 `AGENT_TOKEN` 环境变量传入
 - **配置变更**：保存并应用后由页面显式触发服务重载，保证启用状态与进程一致
 - **服务管理**：procd 实例级管理，停止/卸载不影响其他进程
+- **日志分流**：Agent 的 stdout/stderr 由 `run.sh` 重定向到 `/tmp/log/komari-agent.log`，
+  不再经 procd 进入 logd/syslog。`logd.sh` 每 20 秒检查一次，超过 `log_max_size`（KB）
+  就裁掉前半部分、保留尾部一半，裁剪时保持 inode 不变以免 Agent 写到已删除的文件上。
+  日志文件随重启消失（tmpfs），历史日志只保留在页面上
 
 ## 已知限制
 

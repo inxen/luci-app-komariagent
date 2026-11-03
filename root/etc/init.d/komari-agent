@@ -9,6 +9,15 @@ USE_PROCD=1
 PROG=/usr/bin/komari-agent
 CONF=komari_agent
 
+LOG_DIR=/tmp/log
+LOG=$LOG_DIR/komari-agent.log
+
+# 服务自身的提示也写进日志文件，不进 syslog（UTC 时间，与 agent 输出一致）
+logmsg() {
+	mkdir -p "$LOG_DIR"
+	echo "$(date -u '+%Y/%m/%d %H:%M:%S') $*" >> "$LOG"
+}
+
 start_service() {
 	local enabled endpoint token interval dweb dcert
 	local nics exclude_nics mounts rint rmax ip_mode ipv4 ipv6
@@ -30,17 +39,17 @@ start_service() {
 	config_get      ipv6         'agent' 'custom_ipv6'       ''
 
 	[ "$enabled" = "1" ] || {
-		logger -t komari-agent "服务未启用（uci $CONF.agent.enabled=0），跳过启动"
+		logmsg "服务未启用（uci $CONF.agent.enabled=0），跳过启动"
 		return 1
 	}
 
 	[ -x "$PROG" ] || {
-		logger -t komari-agent "未找到 Agent 二进制 $PROG，请在 LuCI「Komari Agent」页面检查更新或上传"
+		logmsg "未找到 Agent 二进制 $PROG，请在 LuCI「Komari Agent」页面检查更新或上传"
 		return 1
 	}
 
 	[ -n "$endpoint" ] || {
-		logger -t komari-agent "未配置服务端地址，跳过启动"
+		logmsg "未配置服务端地址，跳过启动"
 		return 1
 	}
 
@@ -48,12 +57,12 @@ start_service() {
 	case "$interval" in ''|*[!0-9.]*) interval=3 ;; esac
 	case "$rint" in ''|*[!0-9]*) rint=5 ;; esac
 	case "$rmax" in ''|*[!0-9]*) rmax=3 ;; esac
-	case "$endpoint" in *[!A-Za-z0-9._~:/?#\[\]@!\$\&\'\(\)\*+,\;=%-]*) logger -t komari-agent "endpoint 含非法字符，拒绝启动"; return 1 ;; esac
+	case "$endpoint" in *[!A-Za-z0-9._~:/?#\[\]@!\$\&\'\(\)\*+,\;=%-]*) logmsg "endpoint 含非法字符，拒绝启动"; return 1 ;; esac
 
 	chmod 600 /etc/config/$CONF 2>/dev/null
 
-	procd_open_instance
-	procd_set_param command "$PROG" \
+	procd_open_instance agent
+	procd_set_param command /usr/libexec/komari/run.sh \
 		--endpoint "$endpoint" \
 		--interval "$interval" \
 		--disable-auto-update \
@@ -73,11 +82,11 @@ start_service() {
 			;;
 		custom)
 			case "$ipv4" in
-				''|*[!0-9.]*) [ -n "$ipv4" ] && logger -t komari-agent "自定义 IPv4 格式异常，已忽略" ;;
+				''|*[!0-9.]*) [ -n "$ipv4" ] && logmsg "自定义 IPv4 格式异常，已忽略" ;;
 				*) procd_append_param command --custom-ipv4 "$ipv4" ;;
 			esac
 			case "$ipv6" in
-				''|*[!0-9A-Fa-f:.]*) [ -n "$ipv6" ] && logger -t komari-agent "自定义 IPv6 格式异常，已忽略" ;;
+				''|*[!0-9A-Fa-f:.]*) [ -n "$ipv6" ] && logmsg "自定义 IPv6 格式异常，已忽略" ;;
 				*) [ -n "$ipv6" ] && procd_append_param command --custom-ipv6 "$ipv6" ;;
 			esac
 			;;
@@ -86,9 +95,18 @@ start_service() {
 	# Token 走环境变量：/proc/<pid>/environ 仅 root 可读，不进入全局可读的 cmdline
 	procd_set_param env AGENT_TOKEN="$token"
 	procd_set_param respawn 3600 5 5
-	procd_set_param stdout 1
-	procd_set_param stderr 1
+	# 日志由 run.sh 重定向到 /tmp/log/komari-agent.log（tmpfs），不送 syslog
+	procd_set_param stdout 0
+	procd_set_param stderr 0
 	procd_set_param file /etc/config/$CONF
+	procd_close_instance
+
+	# 日志大小守护：超过 log_max_size(KB) 自动裁剪尾部
+	procd_open_instance logd
+	procd_set_param command /bin/sh /usr/libexec/komari/logd.sh
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 0
+	procd_set_param stderr 0
 	procd_close_instance
 }
 

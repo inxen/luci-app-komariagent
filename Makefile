@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-komari
-PKG_VERSION:=0.1.4
+PKG_VERSION:=0.2.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=inxen
@@ -73,6 +73,8 @@ define Package/luci-app-komari/install
 	$(INSTALL_BIN) ./root/etc/init.d/komari-agent $(1)/etc/init.d/komari-agent
 	$(INSTALL_BIN) ./root/etc/uci-defaults/60_luci-komari $(1)/etc/uci-defaults/60_luci-komari
 	$(INSTALL_BIN) ./root/usr/libexec/komari/install-job.sh $(1)/usr/libexec/komari/install-job.sh
+	$(INSTALL_BIN) ./root/usr/libexec/komari/run.sh $(1)/usr/libexec/komari/run.sh
+	$(INSTALL_BIN) ./root/usr/libexec/komari/logd.sh $(1)/usr/libexec/komari/logd.sh
 
 	$(INSTALL_DATA) ./root/usr/share/rpcd/ucode/komari $(1)/usr/share/rpcd/ucode/komari
 	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-komari.json $(1)/usr/share/rpcd/acl.d/luci-app-komari.json

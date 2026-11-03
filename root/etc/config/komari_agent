@@ -14,3 +14,7 @@ config komari_agent 'agent'
 	option ip_mode 'auto'
 	option reconnect_interval '5'
 	option max_retries '3'
+
+	# 日志上限（KB）：写入 /tmp/log/komari-agent.log（tmpfs 内存）
+	# 超过后自动裁剪并保留尾部一半；不会占用闪存，也不进 syslog
+	option log_max_size '256'

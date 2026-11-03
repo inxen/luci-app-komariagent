@@ -42,6 +42,20 @@ function fmtDate(s) {
 		p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
+/* agent 日志时间戳是 UTC（Go 的 log 包 + OpenWrt 无 tzdata），
+   在前端按浏览器本地时区重排，避免 8 小时时差干扰排查。 */
+function fmtLogLine(l) {
+	var m = l.match(/^(\d{4})\/(\d{2})\/(\d{2}) (\d{2}):(\d{2}):(\d{2}) ([\s\S]*)$/);
+	if (!m)
+		return l;
+	var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+	if (isNaN(d.getTime()))
+		return l;
+	var p = function(n) { return n < 10 ? '0' + n : '' + n; };
+	return d.getFullYear() + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' +
+		p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + ' ' + m[7];
+}
+
 function ensureOk(r) {
 	if (r && r.ok === false)
 		throw new Error(r.error || '操作失败');
@@ -182,7 +196,9 @@ return view.extend({
 		]);
 
 		/* ---------- 日志 ---------- */
+		n.logMeta = E('div', { 'class': 'cbi-value-description', 'style': 'margin:0 0 8px' }, '');
 		var logCard = card('最近日志', [
+			n.logMeta,
 			n.log,
 			E('div', { 'style': 'margin-top:10px' },
 				E('button', { 'class': 'cbi-button', 'click': ui.createHandlerFn(this, 'refreshLog') }, '刷新日志'))
@@ -326,6 +342,12 @@ return view.extend({
 		o = s.option(form.Value, 'max_retries', '最大重试次数', '连续失败达到该次数后转入 HTTP 降级上报模式。');
 		o.datatype = 'range(1,20)';
 		o.default = '3';
+
+		o = s.option(form.Value, 'log_max_size', '日志上限（KB）',
+			'日志写入 /tmp/log（内存 tmpfs，不占闪存、不写系统日志）。超过上限自动裁掉前半部分；最小 32KB，默认 256KB。');
+		o.datatype = 'range(32,8192)';
+		o.default = '256';
+		o.rmempty = false;
 	},
 
 	applyStatus: function(st) {
@@ -345,7 +367,17 @@ return view.extend({
 		n.lasterr.textContent = st.last_error || '暂无';
 		n.updCur.textContent = st.binary_exists ? (st.version || '未知') : '未安装';
 
-		n.log.textContent = (st.log_tail && st.log_tail.length) ? st.log_tail.join('\n') : '（暂无日志）';
+		n.log.textContent = (st.log_tail && st.log_tail.length)
+			? st.log_tail.map(fmtLogLine).join('\n')
+			: '（暂无日志）';
+
+		if (n.logMeta) {
+			if (st.log_source === 'file')
+				n.logMeta.textContent = '日志文件 /tmp/log/komari-agent.log（内存 tmpfs，不进系统日志） · ' +
+					fmtSize(st.log_file_size) + ' / ' + st.log_max_size + ' KB · 时间已转为本地时区';
+			else
+				n.logMeta.textContent = '当前仍读系统日志（旧版本）；重启服务后切换到 /tmp/log';
+		}
 
 		if (st.job && (st.job.phase === 'downloading' || st.job.phase === 'verifying' ||
 			st.job.phase === 'installing' || st.job.phase === 'starting'))
@@ -363,7 +395,7 @@ return view.extend({
 		var self = this;
 		return L.resolveDefault(callLog(60), null).then(function(r) {
 			if (r && r.lines)
-				self.n.log.textContent = r.lines.length ? r.lines.join('\n') : '（暂无日志）';
+				self.n.log.textContent = r.lines.length ? r.lines.map(fmtLogLine).join('\n') : '（暂无日志）';
 		});
 	},
 

@@ -26,6 +26,7 @@ const ST_DOWNLOAD = '/tmp/komari-agent.download';
 const ST_UPLOAD = '/tmp/komari-agent.upload';
 const ST_UMETA = '/tmp/komari-agent.upload.meta';
 const CONF_FILE = '/etc/config/komari_agent';
+const LOG_FILE = '/tmp/log/komari-agent.log';
 const MIN_SIZE = 1024 * 1024;
 const MAX_SIZE = 128 * 1024 * 1024;
 
@@ -96,7 +97,8 @@ function conf() {
 		token: g('token') ?? '',
 		interval: g('interval') ?? '3',
 		disable_web_ssh: (g('disable_web_ssh') ?? '1') != '0',
-		ignore_unsafe_cert: (g('ignore_unsafe_cert') ?? '0') == '1'
+		ignore_unsafe_cert: (g('ignore_unsafe_cert') ?? '0') == '1',
+		log_max_size: g('log_max_size') ?? '256'
 	};
 }
 
@@ -134,6 +136,8 @@ function httpGet(url, outfile, timeout, extra) {
 
 /* ---------------- 状态与日志 ---------------- */
 
+/* 服务有两个 procd 实例：agent（主进程）与 logd（日志裁剪守护）。
+   优先按实例名取 agent，取不到再回退第一个 running 的实例。 */
 function serviceState() {
 	let r = shell(`ubus call service list '{"name":"komari-agent"}'`);
 	if (r.rc != 0)
@@ -142,15 +146,39 @@ function serviceState() {
 	try { j = json(r.out); } catch (e) { j = null; }
 	let svc = j ? j['komari-agent'] : null;
 	if (svc && svc.instances) {
+		let main = svc.instances['agent'];
+		if (main)
+			return { running: main.running === true, pid: main.pid ?? null };
+		let first = null;
 		for (let k in svc.instances) {
 			let inst = svc.instances[k];
-			return { running: inst.running === true, pid: inst.pid ?? null };
+			let cur = { running: inst.running === true, pid: inst.pid ?? null };
+			if (first == null)
+				first = cur;
+			if (cur.running)
+				return cur;
 		}
+		if (first != null)
+			return first;
 	}
 	return { running: false, pid: null };
 }
 
 function logLines() {
+	/* 首选插件自己的日志文件（tmpfs，受 log_max_size 限制，且不进 syslog）；
+	   文件不存在时（老版本 / 尚未重启服务）回退读 syslog。 */
+	if (exists(LOG_FILE)) {
+		let file = readfile(LOG_FILE) ?? '';
+		if (trim2(file) != '') {
+			/* 去掉结尾换行产生的空串，否则 slice 取 N 行会少一行 */
+			let raw = split(file, '\n');
+			let out = [];
+			for (let i = 0; i < length(raw); i++)
+				if (trim2(raw[i]) != '')
+					push(out, raw[i]);
+			return out;
+		}
+	}
 	let r = shell('logread -e komari-agent');
 	if (r.rc != 0)
 		return [];
@@ -320,6 +348,9 @@ const methods = {
 			let c = conf();
 			let st = serviceState();
 			let lines = sanitize(logLines(), c.token);
+			let lmax = +c.log_max_size;
+			if (!(lmax >= 32))
+				lmax = 256;
 			let lastConnect = null, lastError = null;
 			for (let i = length(lines) - 1; i >= 0; i--) {
 				if (lastConnect == null && match(lines[i], /WebSocket connected/))
@@ -344,6 +375,9 @@ const methods = {
 				last_connect: lastConnect,
 				last_error: lastError,
 				log_tail: slice(lines, -25),
+				log_max_size: lmax,
+				log_file_size: exists(LOG_FILE) ? fsize(LOG_FILE) : 0,
+				log_source: exists(LOG_FILE) ? 'file' : 'syslog',
 				job: jobState()
 			};
 		}
