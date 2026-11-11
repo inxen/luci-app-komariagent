@@ -27,8 +27,19 @@ if [ -f "$LOG" ]; then
 	fi
 fi
 
-# 与 agent 自身日志统一用 UTC（LuCI 页面负责转本地时区显示）
-echo "$(date -u '+%Y/%m/%d %H:%M:%S') --- komari-agent starting ---" >> "$LOG"
+# 时区：优先使用系统 zoneinfo；OpenWrt 默认不装（/etc/localtime 只是文本 "CST-8"，
+# Go 无法解析会退回 UTC），此时回退到插件自带的 Asia/Shanghai TZif 文件。
+TZ_NAME=$(uci -q get system.@system[0].zonename)
+TZ_POSIX=$(uci -q get system.@system[0].timezone)
+if [ -n "$TZ_NAME" ] && [ -f "/usr/share/zoneinfo/$TZ_NAME" ]; then
+	export TZ="$TZ_NAME"
+elif [ "$TZ_POSIX" = "CST-8" ] && [ -f /usr/share/komari-agent/tzif/Asia/Shanghai ]; then
+	export TZ=/usr/share/komari-agent/tzif/Asia/Shanghai
+else
+	export TZ=UTC
+fi
+
+echo "$(date '+%Y/%m/%d %H:%M:%S') --- komari-agent starting ---" >> "$LOG"
 
 # exec 保持 PID 不变，procd 仍能正确跟踪/回收
 exec /usr/bin/komari-agent "$@" >> "$LOG" 2>&1

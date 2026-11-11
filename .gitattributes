@@ -2,3 +2,4 @@
 *.png binary
 *.ipk binary
 *.apk binary
+root/usr/share/komari-agent/tzif/** binary

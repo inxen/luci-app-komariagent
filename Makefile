@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-komari
-PKG_VERSION:=0.2.0
+PKG_VERSION:=0.2.1
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=inxen
@@ -67,6 +67,7 @@ define Package/luci-app-komari/install
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/ucode
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
+	$(INSTALL_DIR) $(1)/usr/share/komari-agent/tzif/Asia
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/komari
 
 	$(INSTALL_CONF) ./root/etc/config/komari_agent $(1)/etc/config/komari_agent
@@ -79,6 +80,7 @@ define Package/luci-app-komari/install
 	$(INSTALL_DATA) ./root/usr/share/rpcd/ucode/komari $(1)/usr/share/rpcd/ucode/komari
 	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-komari.json $(1)/usr/share/rpcd/acl.d/luci-app-komari.json
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-komari.json $(1)/usr/share/luci/menu.d/luci-app-komari.json
+	$(INSTALL_DATA) ./root/usr/share/komari-agent/tzif/Asia/Shanghai $(1)/usr/share/komari-agent/tzif/Asia/Shanghai
 
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/komari/overview.js $(1)/www/luci-static/resources/view/komari/overview.js
 endef

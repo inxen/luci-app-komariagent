@@ -12,10 +12,10 @@ CONF=komari_agent
 LOG_DIR=/tmp/log
 LOG=$LOG_DIR/komari-agent.log
 
-# 服务自身的提示也写进日志文件，不进 syslog（UTC 时间，与 agent 输出一致）
+# 服务自身的提示也写进日志文件，不进 syslog（本地时区，与 agent 输出一致）
 logmsg() {
 	mkdir -p "$LOG_DIR"
-	echo "$(date -u '+%Y/%m/%d %H:%M:%S') $*" >> "$LOG"
+	echo "$(date '+%Y/%m/%d %H:%M:%S') $*" >> "$LOG"
 }
 
 start_service() {

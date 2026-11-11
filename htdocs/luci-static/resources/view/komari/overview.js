@@ -42,20 +42,6 @@ function fmtDate(s) {
 		p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
-/* agent 日志时间戳是 UTC（Go 的 log 包 + OpenWrt 无 tzdata），
-   在前端按浏览器本地时区重排，避免 8 小时时差干扰排查。 */
-function fmtLogLine(l) {
-	var m = l.match(/^(\d{4})\/(\d{2})\/(\d{2}) (\d{2}):(\d{2}):(\d{2}) ([\s\S]*)$/);
-	if (!m)
-		return l;
-	var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-	if (isNaN(d.getTime()))
-		return l;
-	var p = function(n) { return n < 10 ? '0' + n : '' + n; };
-	return d.getFullYear() + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' +
-		p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + ' ' + m[7];
-}
-
 function ensureOk(r) {
 	if (r && r.ok === false)
 		throw new Error(r.error || '操作失败');
@@ -368,13 +354,13 @@ return view.extend({
 		n.updCur.textContent = st.binary_exists ? (st.version || '未知') : '未安装';
 
 		n.log.textContent = (st.log_tail && st.log_tail.length)
-			? st.log_tail.map(fmtLogLine).join('\n')
+			? st.log_tail.join('\n')
 			: '（暂无日志）';
 
 		if (n.logMeta) {
 			if (st.log_source === 'file')
 				n.logMeta.textContent = '日志文件 /tmp/log/komari-agent.log（内存 tmpfs，不进系统日志） · ' +
-					fmtSize(st.log_file_size) + ' / ' + st.log_max_size + ' KB · 时间已转为本地时区';
+					fmtSize(st.log_file_size) + ' / ' + st.log_max_size + ' KB · 时间为系统本地时区';
 			else
 				n.logMeta.textContent = '当前仍读系统日志（旧版本）；重启服务后切换到 /tmp/log';
 		}
@@ -395,7 +381,7 @@ return view.extend({
 		var self = this;
 		return L.resolveDefault(callLog(60), null).then(function(r) {
 			if (r && r.lines)
-				self.n.log.textContent = r.lines.length ? r.lines.map(fmtLogLine).join('\n') : '（暂无日志）';
+				self.n.log.textContent = r.lines.length ? r.lines.join('\n') : '（暂无日志）';
 		});
 	},
 
