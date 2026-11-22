@@ -293,11 +293,12 @@ return view.extend({
 		o.default = '0';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'download_mirror', '镜像前缀',
-			'可自行填写其他镜像站，必须是前缀形式并以 / 结尾，例如 https://gh-proxy.org/ 、https://ghfast.top/ 、https://gh-proxy.com/ 。');
+		/* 前缀常显：若随开关隐藏，关闭开关后保存会按空值把前缀删掉 */
+		o = s.option(form.Value, 'download_mirror', '镜像前缀（开关打开时生效）',
+			'可自行填写其他镜像站，必须是前缀形式并以 / 结尾，例如 https://gh-proxy.org/ 、https://ghfast.top/ 、https://gh-proxy.com/ 。' +
+			'关闭开关不会清空这里的内容。');
 		o.placeholder = 'https://gh-proxy.org/';
 		o.rmempty = true;
-		o.depends('download_mirror_enable', '1');
 		o.validate = function(section_id, value) {
 			if (value == null || value === '')
 				return true;
