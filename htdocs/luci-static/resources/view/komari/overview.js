@@ -283,6 +283,24 @@ return view.extend({
 		o.default = '0';
 		o.rmempty = false;
 
+		s = m.section(form.NamedSection, 'agent', 'komari_agent', '下载设置');
+		s.addremove = false;
+
+		o = s.option(form.Value, 'download_mirror', '下载镜像前缀',
+			'留空则只直连 GitHub。填写形如 https://gh-proxy.org/ 的前缀后，直连失败会自动改用「前缀 + 原始 GitHub 地址」再下载一次。' +
+			'文件仍按 GitHub API 返回的 SHA256 校验，镜像无法替换内容；仍失败可用「手动上传二进制」。');
+		o.placeholder = 'https://gh-proxy.org/';
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			if (value == null || value === '')
+				return true;
+			if (!/^https?:\/\/[0-9A-Za-z.-]+(:[0-9]{1,5})?(\/[0-9A-Za-z._~\/-]*)?$/.test(value))
+				return '只允许 http(s)://主机[:端口]/路径 形式，不能含引号、空格或查询串';
+			if (value.charAt(value.length - 1) !== '/')
+				return '前缀必须以 / 结尾，例如 https://gh-proxy.org/';
+			return true;
+		};
+
 		s = m.section(form.NamedSection, 'agent', 'komari_agent', '采集范围');
 		s.addremove = false;
 
@@ -366,7 +384,7 @@ return view.extend({
 		}
 
 		if (st.job && (st.job.phase === 'downloading' || st.job.phase === 'verifying' ||
-			st.job.phase === 'installing' || st.job.phase === 'starting'))
+			st.job.phase === 'installing' || st.job.phase === 'starting' || st.job.phase === 'connecting'))
 			this.startJobPolling();
 	},
 
@@ -461,6 +479,9 @@ return view.extend({
 			self.n.updMsg.textContent = '正在启动安装任务…';
 			return callInstall(r.latest, r.url, r.digest, r.size).then(function(res) {
 				ensureOk(res);
+				/* 只表示「任务已拉起」；真实进度交给下方进度条，失败也不能一直挂着这句话 */
+				self.n.updMsg.textContent = '安装任务已启动（' + res.version + '）' +
+					(res.mirror ? '，直连失败将改用镜像 ' + res.mirror : '') + '，正在下载…';
 				self.startJobPolling();
 			}).catch(function(e) {
 				self.n.btnInstall.disabled = false;
@@ -480,9 +501,20 @@ return view.extend({
 				if (j.phase === 'done' || j.phase === 'error' || j.phase === 'idle') {
 					window.clearInterval(self.jobTimer);
 					self.jobTimer = null;
-					window.setTimeout(function() { self.n.jobBox.style.display = 'none'; }, 4000);
-					if (j.phase === 'done')
+					/* 失败后必须解锁按钮，否则页面看起来像卡死，只能刷新重来 */
+					self.n.btnInstall.disabled = false;
+					if (j.phase === 'done') {
+						self.n.updMsg.textContent = '安装完成，当前版本：' + (j.version || '未知');
 						ui.addNotification(null, E('p', {}, '安装完成，当前版本：' + (j.version || '未知')), 'info');
+						window.setTimeout(function() { self.n.jobBox.style.display = 'none'; }, 4000);
+					}
+					else if (j.phase === 'error') {
+						var m = j.message || '未知错误';
+						self.n.updMsg.textContent = /^(安装|下载)失败/.test(m) ? m : '安装失败：' + m;
+					}
+					else {
+						window.setTimeout(function() { self.n.jobBox.style.display = 'none'; }, 4000);
+					}
 					self.refresh();
 				}
 			}).catch(function() {});
@@ -500,8 +532,22 @@ return view.extend({
 			pct = 100;
 		box.firstChild.title = pct + '%';
 		box.firstChild.firstChild.style.width = pct + '%';
-		box.lastChild.textContent = (j.message || j.phase) +
-			(j.phase === 'downloading' && j.total ? '（' + fmtSize(j.bytes) + ' / ' + fmtSize(j.total) + '）' : '');
+
+		var msg = j.message || j.phase;
+		if (j.phase === 'downloading') {
+			msg += '（' + fmtSize(j.bytes) + ' / ' + fmtSize(j.total) + '）';
+			if (j.wait > 5)
+				msg += ' · 已 ' + j.wait + ' 秒无新数据';
+		}
+		else if (j.phase === 'connecting' && j.wait > 2) {
+			msg += ' · 已等待 ' + j.wait + ' 秒';
+		}
+		/* connecting 阶段超过 20 秒基本就是域名被阻断，给出可操作的提示 */
+		if (j.phase === 'connecting' && j.wait > 20)
+			msg += '（连不上该域名，可在「下载设置」配置镜像）';
+		if (j.stalled)
+			msg += '（下载停滞，可能是网络阻断）';
+		box.lastChild.textContent = msg;
 		box.lastChild.style.color = j.phase === 'error' ? '#c62828' : '';
 	},
 

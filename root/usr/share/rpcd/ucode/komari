@@ -75,6 +75,15 @@ function fsize(path) {
 	}
 }
 
+function fmtime(path) {
+	try {
+		let s = stat(path);
+		return s ? s.mtime : -1;
+	} catch (e) {
+		return -1;
+	}
+}
+
 function exists(path) {
 	return access(path);
 }
@@ -98,7 +107,8 @@ function conf() {
 		interval: g('interval') ?? '3',
 		disable_web_ssh: (g('disable_web_ssh') ?? '1') != '0',
 		ignore_unsafe_cert: (g('ignore_unsafe_cert') ?? '0') == '1',
-		log_max_size: g('log_max_size') ?? '256'
+		log_max_size: g('log_max_size') ?? '256',
+		download_mirror: trim2(g('download_mirror') ?? '')
 	};
 }
 
@@ -253,6 +263,11 @@ function verGreater(a, b) {
 
 /* ---------------- 安装任务状态 ---------------- */
 
+/* 任务阶段：starting → connecting → downloading → verifying → installing → done/error。
+   脚本只在「连接源」时写 connecting，插件据下载文件是否已出现推断 downloading，
+   这样连接阶段（0 字节、可能长达数十秒）也能给出明确的等待时长，而不是假装在下载。 */
+const JOB_ACTIVE = [ 'starting', 'connecting', 'downloading', 'verifying', 'installing' ];
+
 function jobState() {
 	let st = null;
 	if (exists(ST_STATUS)) {
@@ -260,26 +275,62 @@ function jobState() {
 	}
 	let phase = st ? (st.phase ?? 'idle') : 'idle';
 	let total = st ? +(st.total ?? 0) : 0;
+	let msg = st ? (st.message ?? '') : '';
+	let src = st ? (st.src ?? '') : '';
+	let pid = st ? +(st.pid ?? 0) : 0;
+	let ts = st ? +(st.ts ?? 0) : 0;
 	let bytes = 0;
-	if (phase == 'downloading') {
-		bytes = fsize(ST_DOWNLOAD);
-		if (bytes < 0)
-			bytes = 0;
+	let wait = 0;
+
+	if (phase == 'connecting' || phase == 'downloading') {
+		/* 进程没了说明脚本被中断（重启 / OOM / 被杀），别让状态永远挂在进行中 */
+		if (pid > 0 && !exists(`/proc/${pid}`)) {
+			phase = 'error';
+			msg = '安装任务已中断（下载进程已退出），请重试';
+		}
+		else {
+			bytes = fsize(ST_DOWNLOAD);
+			if (bytes < 0)
+				bytes = 0;
+			/* 有数据即认为进入下载；无数据则停在连接阶段，并用状态文件时间计时 */
+			if (bytes > 0 && phase == 'connecting')
+				phase = 'downloading';
+			msg = (phase == 'downloading' ? '正在下载 ' : '正在连接 ') + (src != '' ? src : '');
+			let ref = phase == 'downloading' ? fmtime(ST_DOWNLOAD) : ts;
+			if (ref > 0)
+				wait = time() - ref;
+		}
 	}
-	else if (phase == 'installing' || phase == 'verifying' || phase == 'done')
+	else if (phase == 'verifying' || phase == 'installing' || phase == 'done') {
 		bytes = total;
+		if (pid > 0 && phase != 'done' && !exists(`/proc/${pid}`)) {
+			phase = 'error';
+			msg = '安装任务已中断（安装进程已退出），请重试';
+		}
+	}
+
+	/* setsid 拉起失败时状态会停在 starting，同样不能让它一直挂着 */
+	if (phase == 'starting' && ts > 0 && (time() - ts) > 20) {
+		phase = 'error';
+		msg = '安装任务未能启动（后台脚本未运行），请重试';
+	}
+
+	if (wait < 0)
+		wait = 0;
+
 	return {
 		phase: phase,
-		message: st ? (st.message ?? '') : '',
+		message: msg,
 		total: total,
 		bytes: bytes,
+		wait: wait,
+		stalled: (phase == 'downloading') && wait > 20,
 		msg_time: st ? (st.msg_time ?? null) : null
 	};
 }
 
 function jobActive() {
-	let j = jobState();
-	return j.phase == 'downloading' || j.phase == 'verifying' || j.phase == 'installing';
+	return index(JOB_ACTIVE, jobState().phase) >= 0;
 }
 
 /* ---------------- 校验 ---------------- */
@@ -294,6 +345,19 @@ function validDigest(d) {
 
 function validUrl(u) {
 	return match(u ?? '', /^https:\/\/github\.com\/komari-monitor\/komari-agent\/releases\/download\/[0-9A-Za-z._\/-]+$/) != null;
+}
+
+/* 镜像前缀：仅允许 http(s)://host[:port]/path 形态，且必须以 / 结尾，
+   以便与原始 GitHub 地址拼接成 <前缀><完整 URL>。空串表示不启用镜像。 */
+function validMirror(m) {
+	let s = `${m ?? ''}`;
+	if (s == '')
+		return true;
+	if (length(s) > 200)
+		return false;
+	if (match(s, /^https?:\/\/[0-9A-Za-z.-]+(:[0-9]{1,5})?(\/[0-9A-Za-z._~\/-]*)?$/) == null)
+		return false;
+	return substr(s, -1) == '/';
 }
 
 function elfHeaderHex(path) {
@@ -566,6 +630,7 @@ const methods = {
 			let url = `${request.args.url ?? ''}`;
 			let digest = `${request.args.digest ?? ''}`;
 			let size = +request.args.size;
+			let mirror = conf().download_mirror;
 
 			if (!validVersion(version))
 				return fail('版本号格式非法');
@@ -575,13 +640,16 @@ const methods = {
 				return fail('缺少合法的 SHA256 摘要，拒绝安装未校验文件');
 			if (!(size >= MIN_SIZE && size <= MAX_SIZE))
 				return fail('文件大小超出允许范围');
+			if (!validMirror(mirror))
+				return fail('下载镜像前缀格式无效（须形如 https://mirror.example/ 并以 / 结尾）');
 			if (jobActive())
 				return fail('已有安装任务正在进行');
-			writefile(ST_STATUS, sprintf('{"phase":"starting","message":"准备安装 %s","total":%d}\n', version, size));
+			writefile(ST_STATUS, sprintf('{"phase":"starting","message":"准备安装 %s","total":%d,"ts":%d,"pid":0}\n',
+				version, size, time()));
 			unlink(ST_DOWNLOAD);
 
-			spawn(`setsid sh ${sq(JOB_SCRIPT)} ${sq(url)} ${sq(digest)} ${sq(size)} ${sq(version)} </dev/null >/dev/null 2>&1 &`);
-			return { ok: true, version: version };
+			spawn(`setsid sh ${sq(JOB_SCRIPT)} ${sq(url)} ${sq(digest)} ${sq(size)} ${sq(version)} ${sq(mirror)} </dev/null >/dev/null 2>&1 &`);
+			return { ok: true, version: version, mirror: mirror != '' ? mirror : null };
 		}
 	},
 
