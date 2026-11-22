@@ -19,7 +19,9 @@ config komari_agent 'agent'
 	# 超过后自动裁剪并保留尾部一半；不会占用闪存，也不进 syslog
 	option log_max_size '256'
 
-	# 下载镜像前缀：留空=只直连 GitHub
-	# 填写后直连失败会自动改用「前缀+原始 GitHub 地址」再试一次
+	# 下载源：开关关闭=只直连 GitHub
+	# 开启后先用「镜像前缀+原始 GitHub 地址」下载，失败自动回退直连
+	# 前缀可自行换成其他镜像站，须为 http(s)://主机/路径/ 并以 / 结尾
 	# 文件仍按 GitHub API 的 SHA256 校验，镜像无法替换内容
+	option download_mirror_enable '0'
 	option download_mirror ''

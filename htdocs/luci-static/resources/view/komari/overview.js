@@ -125,6 +125,7 @@ return view.extend({
 		n.updDate = cell();
 		n.updSize = cell();
 		n.updDigest = cell();
+		n.src = cell();
 		n.updMsg = E('div', { 'class': 'cbi-value-description', 'style': 'margin-top:10px' }, '');
 		n.log = E('pre', {
 			'style': 'max-height:280px;overflow:auto;font-size:12px;line-height:1.45;white-space:pre-wrap;' +
@@ -173,7 +174,7 @@ return view.extend({
 				[ '发布时间', n.updDate ],
 				[ '资产大小', n.updSize ],
 				[ 'SHA256', n.updDigest ],
-				[ '二进制来源', E('span', {}, 'GitHub Release（安装前校验 SHA256）') ]
+				[ '下载源', n.src ]
 			]),
 			E('div', { 'style': 'margin-top:14px;display:flex;flex-wrap:wrap;gap:8px' },
 				[ n.btnCheck, n.btnInstall, n.btnUpload, n.file ]),
@@ -286,11 +287,17 @@ return view.extend({
 		s = m.section(form.NamedSection, 'agent', 'komari_agent', '下载设置');
 		s.addremove = false;
 
-		o = s.option(form.Value, 'download_mirror', '下载镜像前缀',
-			'留空则只直连 GitHub。填写形如 https://gh-proxy.org/ 的前缀后，直连失败会自动改用「前缀 + 原始 GitHub 地址」再下载一次。' +
-			'文件仍按 GitHub API 返回的 SHA256 校验，镜像无法替换内容；仍失败可用「手动上传二进制」。');
+		o = s.option(form.Flag, 'download_mirror_enable', '使用下载镜像',
+			'关闭＝只直连 GitHub。开启后先用「镜像前缀 + 原始 GitHub 地址」下载，失败自动回退直连。' +
+			'期望 SHA256 与字节数始终来自 api.github.com，镜像无法替换内容。');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'download_mirror', '镜像前缀',
+			'可自行填写其他镜像站，必须是前缀形式并以 / 结尾，例如 https://gh-proxy.org/ 、https://ghfast.top/ 、https://gh-proxy.com/ 。');
 		o.placeholder = 'https://gh-proxy.org/';
 		o.rmempty = true;
+		o.depends('download_mirror_enable', '1');
 		o.validate = function(section_id, value) {
 			if (value == null || value === '')
 				return true;
@@ -370,6 +377,13 @@ return view.extend({
 		n.lastconn.textContent = st.last_connect || '暂无记录';
 		n.lasterr.textContent = st.last_error || '暂无';
 		n.updCur.textContent = st.binary_exists ? (st.version || '未知') : '未安装';
+
+		if (n.src) {
+			n.src.textContent = st.download_mirror_enable
+				? (st.download_mirror ? '镜像 ' + st.download_mirror : '镜像已开启，但未填写前缀')
+				: 'GitHub 直连';
+			n.src.style.color = (st.download_mirror_enable && !st.download_mirror) ? '#c62828' : '';
+		}
 
 		n.log.textContent = (st.log_tail && st.log_tail.length)
 			? st.log_tail.join('\n')
@@ -480,8 +494,8 @@ return view.extend({
 			return callInstall(r.latest, r.url, r.digest, r.size).then(function(res) {
 				ensureOk(res);
 				/* 只表示「任务已拉起」；真实进度交给下方进度条，失败也不能一直挂着这句话 */
-				self.n.updMsg.textContent = '安装任务已启动（' + res.version + '）' +
-					(res.mirror ? '，直连失败将改用镜像 ' + res.mirror : '') + '，正在下载…';
+				self.n.updMsg.textContent = '安装任务已启动（' + res.version + '），下载源：' +
+					(res.mirror ? '镜像 ' + res.mirror : 'GitHub 直连') + '，正在下载…';
 				self.startJobPolling();
 			}).catch(function(e) {
 				self.n.btnInstall.disabled = false;

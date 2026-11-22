@@ -100,6 +100,8 @@ function readJson(path) {
 function conf() {
 	let u = cursor();
 	let g = function(k) { return u.get('komari_agent', 'agent', k); };
+	let mir = trim2(g('download_mirror') ?? '');
+	let men = g('download_mirror_enable');
 	return {
 		enabled: g('enabled') == '1',
 		endpoint: trim2(g('endpoint') ?? ''),
@@ -108,7 +110,9 @@ function conf() {
 		disable_web_ssh: (g('disable_web_ssh') ?? '1') != '0',
 		ignore_unsafe_cert: (g('ignore_unsafe_cert') ?? '0') == '1',
 		log_max_size: g('log_max_size') ?? '256',
-		download_mirror: trim2(g('download_mirror') ?? '')
+		download_mirror: mir,
+		/* 老配置只填了前缀、没有开关：按「已启用」处理，避免升级后静默失效 */
+		download_mirror_enable: men == null ? (mir != '') : (men == '1')
 	};
 }
 
@@ -436,6 +440,8 @@ const methods = {
 				disable_web_ssh: c.disable_web_ssh,
 				ignore_unsafe_cert: c.ignore_unsafe_cert,
 				token_set: c.token != '',
+				download_mirror: c.download_mirror,
+				download_mirror_enable: c.download_mirror_enable,
 				last_connect: lastConnect,
 				last_error: lastError,
 				log_tail: slice(lines, -25),
@@ -630,7 +636,8 @@ const methods = {
 			let url = `${request.args.url ?? ''}`;
 			let digest = `${request.args.digest ?? ''}`;
 			let size = +request.args.size;
-			let mirror = conf().download_mirror;
+			let c = conf();
+			let mirror = c.download_mirror_enable ? c.download_mirror : '';
 
 			if (!validVersion(version))
 				return fail('版本号格式非法');
@@ -640,6 +647,8 @@ const methods = {
 				return fail('缺少合法的 SHA256 摘要，拒绝安装未校验文件');
 			if (!(size >= MIN_SIZE && size <= MAX_SIZE))
 				return fail('文件大小超出允许范围');
+			if (c.download_mirror_enable && mirror == '')
+				return fail('已启用下载镜像但未填写镜像前缀，请在「下载设置」补全或关闭开关');
 			if (!validMirror(mirror))
 				return fail('下载镜像前缀格式无效（须形如 https://mirror.example/ 并以 / 结尾）');
 			if (jobActive())

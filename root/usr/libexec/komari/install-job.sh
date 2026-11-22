@@ -77,7 +77,7 @@ if [ "$OK" != "1" ]; then
 	if [ -n "$MIRROR" ]; then
 		st error "下载失败：$ERR"
 	else
-		st error "下载失败：$ERR；可在「下载设置」填写镜像前缀，或手动上传二进制"
+		st error "下载失败：$ERR；可在「下载设置」开启镜像并填写前缀，或手动上传二进制"
 	fi
 	rm -f "$T"
 	exit 1
